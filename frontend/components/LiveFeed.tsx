@@ -6,18 +6,20 @@ interface LiveFeedProps {
   events: CityEvent[];
 }
 
-function eventIcon(type: CityEvent["type"]): string {
+function eventLabel(type: string): { tag: string; color: string } {
   switch (type) {
     case "traffic":
-      return "\uD83D\uDE97";
+      return { tag: "TFC", color: "text-[var(--amber)]" };
     case "transit":
-      return "\uD83D\uDE8C";
+      return { tag: "TRN", color: "text-[var(--cyan)]" };
     case "incident":
-      return "\u26A0\uFE0F";
+      return { tag: "INC", color: "text-[var(--red)]" };
     case "weather":
-      return "\uD83C\uDF26\uFE0F";
+      return { tag: "WX", color: "text-[var(--teal)]" };
     case "recommendation":
-      return "\uD83E\uDD16";
+      return { tag: "AI", color: "text-[var(--cyan)]" };
+    default:
+      return { tag: "SYS", color: "text-[var(--text-dim)]" };
   }
 }
 
@@ -27,67 +29,43 @@ function eventSummary(event: CityEvent): string {
       const congested = event.segments.filter(
         (s) => s.congestion_level === "heavy" || s.congestion_level === "severe"
       ).length;
-      return `${congested} congested road${congested !== 1 ? "s" : ""}`;
+      return congested > 0
+        ? `${congested} segment${congested > 1 ? "s" : ""} congested`
+        : "Normal flow";
     }
     case "transit": {
       const delayed = event.vehicles.filter(
         (v) => v.status === "delayed" || v.status === "stopped"
       ).length;
-      return `${delayed} vehicle${delayed !== 1 ? "s" : ""} delayed`;
+      return delayed > 0
+        ? `${delayed} vehicle${delayed > 1 ? "s" : ""} delayed`
+        : "All on schedule";
     }
     case "incident":
       return event.description;
     case "weather": {
       const c = event.conditions;
-      const parts: string[] = [`${Math.round(c.temperature_f)}\u00B0F`];
-      if (c.precipitation !== "none") parts.push(c.precipitation);
-      if (c.alert) parts.push(c.alert);
-      return parts.join(" \u00B7 ");
+      return `${Math.round(c.temperature_f)}°F ${c.precipitation !== "none" ? c.precipitation : "clear"}${c.alert ? " // " + c.alert : ""}`;
     }
     case "recommendation":
-      return event.summary.length > 80
-        ? event.summary.slice(0, 77) + "..."
-        : event.summary;
+      return event.summary.slice(0, 70) + (event.summary.length > 70 ? "..." : "");
+    default:
+      return "System event";
   }
 }
 
-function eventColor(event: CityEvent): string {
-  switch (event.type) {
-    case "traffic": {
-      const hasSevere = event.segments.some(
-        (s) => s.congestion_level === "severe"
-      );
-      const hasHeavy = event.segments.some(
-        (s) => s.congestion_level === "heavy"
-      );
-      if (hasSevere) return "text-red-400";
-      if (hasHeavy) return "text-amber-400";
-      return "text-green-400";
-    }
-    case "transit": {
-      const hasStopped = event.vehicles.some((v) => v.status === "stopped");
-      const hasDelayed = event.vehicles.some((v) => v.status === "delayed");
-      if (hasStopped) return "text-red-400";
-      if (hasDelayed) return "text-amber-400";
-      return "text-green-400";
-    }
-    case "incident":
-      if (event.severity === "critical" || event.severity === "high")
-        return "text-red-400";
-      if (event.severity === "medium") return "text-amber-400";
-      return "text-green-400";
-    case "weather":
-      if (event.conditions.alert) return "text-red-400";
-      if (event.conditions.precipitation !== "none") return "text-amber-400";
-      return "text-green-400";
-    case "recommendation":
-      return "text-blue-400";
+function severityDot(event: CityEvent): string {
+  if (event.type === "incident") {
+    if ((event as any).severity === "critical") return "bg-[var(--red)] shadow-[0_0_6px_var(--red)]";
+    if ((event as any).severity === "high") return "bg-[var(--red)]";
+    if ((event as any).severity === "medium") return "bg-[var(--amber)]";
+    return "bg-[var(--text-dim)]";
   }
+  return "";
 }
 
 function formatTime(timestamp: string): string {
-  const d = new Date(timestamp);
-  return d.toLocaleTimeString("en-US", {
+  return new Date(timestamp).toLocaleTimeString("en-US", {
     hour12: false,
     hour: "2-digit",
     minute: "2-digit",
@@ -97,33 +75,47 @@ function formatTime(timestamp: string): string {
 
 export default function LiveFeed({ events }: LiveFeedProps) {
   return (
-    <div className="flex flex-col h-full">
-      <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-400 px-3 py-2 shrink-0">
-        Live Feed
-      </h2>
-      <div className="flex-1 overflow-y-auto min-h-0 space-y-0.5">
-        {events.map((event, i) => (
-          <div
-            key={`${event.type}-${event.timestamp}-${i}`}
-            className="flex items-start gap-2 px-3 py-2 hover:bg-slate-800/50 transition-colors"
-          >
-            <span className="text-base shrink-0 mt-0.5">
-              {eventIcon(event.type)}
-            </span>
-            <div className="flex-1 min-w-0">
-              <p className={`text-sm leading-snug truncate ${eventColor(event)}`}>
-                {eventSummary(event)}
-              </p>
-              <p className="text-[10px] text-slate-500 mt-0.5">
+    <div className="flex flex-col h-full relative corner-brackets">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border-dim)]">
+        <div className="flex items-center gap-2">
+          <div className="w-1.5 h-1.5 bg-[var(--cyan)] rounded-full animate-[data-flow_2s_ease-in-out_infinite]" />
+          <span className="hud-label text-[var(--cyan-muted)]">Event Stream</span>
+        </div>
+        <span className="hud-label">{events.length} EVT</span>
+      </div>
+
+      {/* Events */}
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {events.map((event, i) => {
+          const { tag, color } = eventLabel(event.type);
+          const dot = severityDot(event);
+          return (
+            <div
+              key={`${event.type}-${event.timestamp}-${i}`}
+              className="flex items-start gap-2 px-3 py-1.5 border-b border-[var(--border-dim)] hover:bg-white/[0.02] transition-colors group"
+            >
+              <span className="text-[9px] text-[var(--text-dim)] font-mono mt-0.5 w-14 shrink-0">
                 {formatTime(event.timestamp)}
-              </p>
+              </span>
+              <span className={`text-[9px] font-bold font-mono tracking-wider w-6 shrink-0 mt-0.5 ${color}`}>
+                {tag}
+              </span>
+              {dot && (
+                <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${dot}`} />
+              )}
+              <span className="text-[11px] text-[var(--text-primary)] leading-tight opacity-70 group-hover:opacity-100 transition-opacity">
+                {eventSummary(event)}
+              </span>
             </div>
-          </div>
-        ))}
+          );
+        })}
         {events.length === 0 && (
-          <p className="text-xs text-slate-500 px-3 py-4 text-center">
-            Waiting for events...
-          </p>
+          <div className="flex items-center justify-center py-8">
+            <span className="hud-label animate-[data-flow_2s_ease-in-out_infinite]">
+              AWAITING DATA STREAM...
+            </span>
+          </div>
         )}
       </div>
     </div>

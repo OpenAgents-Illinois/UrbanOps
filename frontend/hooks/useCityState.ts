@@ -28,6 +28,8 @@ export function useCityState() {
     }
 
     const event = data as CityEvent;
+    const knownTypes = ["traffic", "transit", "incident", "weather", "recommendation"];
+    if (!knownTypes.includes(event.type)) return;
     feedRef.current = [event, ...feedRef.current].slice(0, 50);
     setFeed([...feedRef.current]);
 

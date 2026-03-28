@@ -15,7 +15,8 @@ from config import (
     REDIS_URL,
     SEVERITY_ORDER,
 )
-from prompts import SYSTEM_PROMPT
+from fastapi.middleware.cors import CORSMiddleware
+from prompts import SYSTEM_PROMPT, PLAN_PROMPT
 
 try:
     from shared.schemas import (
@@ -84,13 +85,23 @@ def analyze_incident_sync(incident: dict, context: dict) -> dict | None:
     try:
         response = openai_client.chat.completions.create(
             model=MODEL,
-            max_tokens=1024,
+            max_completion_tokens=4096,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        raw = response.choices[0].message.content
+        msg = response.choices[0].message
+        logger.info("GPT-5 response: content=%r, refusal=%r, finish=%s",
+                     (msg.content or "")[:200], getattr(msg, 'refusal', None), response.choices[0].finish_reason)
+        raw = msg.content or ""
+        # Strip markdown fences if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
         data = json.loads(raw)
     except Exception:
         logger.exception("OpenAI API call or JSON parse failed")
@@ -100,12 +111,16 @@ def analyze_incident_sync(incident: dict, context: dict) -> dict | None:
     try:
         actions = []
         for a in data.get("actions", []):
+            # affected_area may come as string (GPT) or coordinates — only keep if valid list
+            area = a.get("affected_area")
+            if not isinstance(area, list):
+                area = None
             actions.append(
                 RecommendationAction(
                     action=ActionType(a["action"]),
                     description=a["description"],
-                    priority=Severity(a["priority"]),
-                    affected_area=a.get("affected_area"),
+                    priority=Severity(a.get("priority", "medium")),
+                    affected_area=area,
                 )
             )
 
@@ -210,6 +225,60 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="UrbanOps Analyst", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def generate_plan_sync(incident: dict) -> dict | None:
+    """Generate a detailed response plan for an incident."""
+    if openai_client is None:
+        return None
+
+    context_parts = []
+    if recent_weather:
+        w = recent_weather.get("conditions", {})
+        context_parts.append(f"Weather: {w.get('temperature_f')}°F, {w.get('precipitation')}, wind {w.get('wind_speed_mph')}mph, visibility {w.get('visibility_miles')}mi")
+        if w.get("alert"):
+            context_parts.append(f"ACTIVE ALERT: {w['alert']}")
+    if recent_traffic:
+        severe = [s for s in recent_traffic.get("segments", []) if s.get("congestion_level") in ("severe", "heavy")]
+        if severe:
+            context_parts.append(f"Congested corridors: {', '.join(s['road'] for s in severe[:6])}")
+
+    user_msg = f"""INCIDENT REQUIRING DETAILED RESPONSE PLAN:
+
+{json.dumps(incident, indent=2, default=str)}
+
+CURRENT CONDITIONS:
+{chr(10).join(context_parts) if context_parts else 'No additional context.'}
+
+Generate a comprehensive, phased response plan."""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=MODEL,
+            max_completion_tokens=4096,
+            messages=[
+                {"role": "system", "content": PLAN_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        raw = response.choices[0].message.content or ""
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        return json.loads(raw)
+    except Exception:
+        logger.exception("Plan generation failed")
+        return None
+
 
 @app.get("/health")
 async def health():
@@ -218,3 +287,12 @@ async def health():
         "status": "ok",
         "llm_configured": openai_client is not None,
     }
+
+
+@app.post("/api/plan")
+async def create_plan(incident: dict):
+    """Generate a detailed response plan for a specific incident."""
+    plan = await asyncio.to_thread(generate_plan_sync, incident)
+    if plan is None:
+        return {"error": "Plan generation failed"}, 500
+    return plan
